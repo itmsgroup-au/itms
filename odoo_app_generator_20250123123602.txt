@@ -1,0 +1,1351 @@
+Directory Tree Structure:
+    __init__.py
+    __manifest__.py
+    security/
+        app_generator_security.xml
+        ir.model.access.csv
+    models/
+        __init__.py
+        app_analysis.py
+        github_repo.py
+        app_generator.py
+        res_config_settings.py
+    static/
+        description/
+        src/
+            css/
+                app_generator.css
+            js/
+                repo_selector.js
+                file_selector.js
+            xml/
+                file_selector.xml
+    wizards/
+        app_analyzer_wizard.py
+        __init__.py
+    controllers/
+        __init__.py
+        main.py
+    data/
+        app_generator_data.xml
+    views/
+        menu_views.xml
+        res_config_settings_views.xml
+        app_generator_views.xml
+
+Detailed File Contents:
+
+    __init__.py
+from . import models
+from . import controllers
+from . import wizards
+
+EOF
+
+    __manifest__.py
+{
+    'name': 'Odoo App Generator',
+    'version': '17.0.1.0.0',
+    'category': 'Development Tools',
+    'summary': 'Generate Odoo App Analysis Reports from GitHub Repositories',
+    'description': """
+Generate comprehensive analysis reports for Odoo applications from GitHub repositories.
+
+Features:
+- GitHub repository integration and file selection
+- AI-powered code analysis using Groq
+- Security, performance, and best practices reviews
+- Downloadable HTML reports
+- Multi-repository support
+    """,
+    'author': 'ITMSGROUP',
+    'website': 'https://www.itmsgroup.com.au',
+    'license': 'LGPL-3',
+    
+    'depends': [
+        'base',
+        'web',
+        'mail',
+        'base_setup',
+    ],
+    
+    'data': [
+        'security/app_generator_security.xml',
+        'security/ir.model.access.csv',
+        'views/app_generator_views.xml',
+        'views/res_config_settings_views.xml',
+        'views/menu_views.xml',
+        'data/app_generator_data.xml',
+    ],
+    
+    'assets': {
+        'web.assets_backend': [
+            'odoo_app_generator/static/src/js/file_selector.js',
+            'odoo_app_generator/static/src/js/repo_selector.js',
+            'odoo_app_generator/static/src/css/app_generator.css',
+            'odoo_app_generator/static/src/xml/file_selector.xml',
+        ],
+    },
+    
+    'demo': [
+        'data/demo_data.xml',
+    ],
+    
+    'images': [
+        'static/description/banner.png',
+        'static/description/icon.png',
+    ],
+    
+    'application': True,
+    'installable': True,
+    'auto_install': False,
+    'sequence': 1,
+    'maintainer': 'Your Company',
+    'support': 'support@yourcompany.com',
+    'price': 11111.0,
+    'currency': 'AUD',
+}
+EOF
+
+    security/
+        app_generator_security.xml
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="module_category_app_generator" model="ir.module.category">
+        <field name="name">App Generator</field>
+        <field name="description">Manage app generation and analysis</field>
+        <field name="sequence">20</field>
+    </record>
+
+    <record id="group_app_generator_user" model="res.groups">
+        <field name="name">User</field>
+        <field name="category_id" ref="module_category_app_generator"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+    </record>
+
+    <record id="group_app_generator_manager" model="res.groups">
+        <field name="name">Manager</field>
+        <field name="category_id" ref="module_category_app_generator"/>
+        <field name="implied_ids" eval="[(4, ref('group_app_generator_user'))]"/>
+        <field name="users" eval="[(4, ref('base.user_admin'))]"/>
+    </record>
+</odoo>
+EOF
+
+        ir.model.access.csv
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_github_repository_user,github.repository.user,model_github_repository,group_app_generator_user,1,1,1,0
+access_github_repository_manager,github.repository.manager,model_github_repository,group_app_generator_manager,1,1,1,1
+access_app_analysis_user,app.analysis.user,model_app_analysis,group_app_generator_user,1,1,1,0
+access_app_analysis_manager,app.analysis.manager,model_app_analysis,group_app_generator_manager,1,1,1,1
+EOF
+
+    models/
+        __init__.py
+from . import app_generator
+from . import res_config_settings
+from . import github_repo
+from . import app_analysis
+
+EOF
+
+        app_analysis.py
+from odoo import models, fields, api
+
+class AppAnalysis(models.Model):
+    _name = 'app.analysis'
+    _description = 'App Analysis Results'
+    _inherit = ['mail.thread']
+
+    name = fields.Char(string='Analysis Name', required=True, tracking=True)
+    generator_id = fields.Many2one('odoo.app.generator', string='Generator', required=True)
+    analysis_date = fields.Datetime(string='Analysis Date', default=fields.Datetime.now)
+    result = fields.Html(string='Analysis Result')
+    score = fields.Float(string='Analysis Score', help="Overall analysis score from 0 to 100")
+    security_score = fields.Float(string='Security Score')
+    performance_score = fields.Float(string='Performance Score')
+    maintainability_score = fields.Float(string='Maintainability Score')
+EOF
+
+        github_repo.py
+from odoo import models, fields, api
+
+class GithubRepository(models.Model):
+    _name = 'github.repository'
+    _description = 'GitHub Repository'
+
+    name = fields.Char(required=True)
+    owner = fields.Char(required=True)
+    url = fields.Char(compute='_compute_url')
+    description = fields.Text()
+    
+    @api.depends('owner', 'name')
+    def _compute_url(self):
+        for repo in self:
+            repo.url = f"https://github.com/{repo.owner}/{repo.name}"
+EOF
+
+        app_generator.py
+from odoo import models, fields, api
+import tempfile
+import os
+import git
+import requests
+import groq
+from odoo.exceptions import UserError
+import logging
+
+_logger = logging.getLogger(__name__)
+
+class AppGenerator(models.Model):
+    _name = 'odoo.app.generator'
+    _description = 'Odoo App Generator'
+    _inherit = ['mail.thread', 'mail.activity.mixin']
+    _order = 'create_date desc'
+
+    name = fields.Char(string="Report Name", required=True, tracking=True)
+    github_repo_owner = fields.Char(string="Github Repository Owner", required=True)
+    github_repo_names = fields.Char(string="Github Repositories", required=True,
+                                  help="List of Github repository names, separated by comma")
+    github_repo_id = fields.Selection(selection='_get_github_repo_options',
+                                    string="Github Repository")
+    github_repo_items_selected = fields.Text(string="Selected Repo Items")
+    github_token = fields.Char(string="GitHub Token")
+
+    report_text = fields.Html(string="Report Content", readonly=True)
+    output_file_name = fields.Char(string="Output File Name", readonly=True)
+    line_count = fields.Integer(string="Line Count", readonly=True)
+    token_count = fields.Integer(string="Token Count", readonly=True)
+    top_5_files = fields.Text(string="Top 5 Files by Line Count", readonly=True)
+
+    active = fields.Boolean(default=True, string="Active")
+    state = fields.Selection([
+        ('draft', 'Draft'),
+        ('fetched', 'Repos Fetched'),
+        ('analyzing', 'Analyzing'),
+        ('done', 'Done'),
+        ('failed', 'Failed')
+    ], default='draft', tracking=True)
+
+    analysis_type = fields.Selection([
+        ('full', 'Full Analysis'),
+        ('security', 'Security Review'),
+        ('performance', 'Performance Review')
+    ], string='Analysis Type', default='full', required=True)
+
+    analysis_date = fields.Datetime(string="Analysis Date", readonly=True)
+    analysis_duration = fields.Float(string="Analysis Duration (seconds)", readonly=True)
+    error_message = fields.Text(string="Error Message", readonly=True)
+
+    @api.onchange('github_repo_id')
+    def _onchange_github_repo_id(self):
+        """ Triggered when the GitHub repository selection changes """
+        if self.github_repo_id:
+            self.message_post(body=f"Selected repository changed to {self.github_repo_id}")
+            
+    def action_reset_to_draft(self):
+        """ Reset the analysis state to Draft """
+        self.write({'state': 'draft'})
+
+    @api.model
+    def _get_github_repo_options(self):
+        """Get repository options for selection field"""
+        if not self.github_repo_names:
+            return []
+        repo_names = [name.strip() for name in self.github_repo_names.split(',')]
+        return [(repo_name, repo_name) for repo_name in repo_names]
+
+    def fetch_repositories(self):
+        """Fetch repository list from GitHub"""
+        self.ensure_one()
+        try:
+            headers = {'Accept': 'application/vnd.github.v3+json'}
+            if self.github_token:
+                headers['Authorization'] = f'token {self.github_token}'
+
+            response = requests.get(
+                f'https://api.github.com/users/{self.github_repo_owner}/repos',
+                headers=headers
+            )
+
+            if response.status_code != 200:
+                raise UserError(f"GitHub API error: {response.text}")
+
+            repos = response.json()
+            self.github_repo_names = ','.join(repo['name'] for repo in repos)
+            self.state = 'fetched'
+            
+            self.message_post(body="Successfully fetched repository list from GitHub")
+            return True
+
+        except Exception as e:
+            self.state = 'failed'
+            self.error_message = str(e)
+            _logger.error(f"Error fetching repositories: {str(e)}")
+            raise UserError(f"Failed to fetch repositories: {str(e)}")
+
+    def get_repository_items(self):
+        """Get list of files and folders from selected repository"""
+        self.ensure_one()
+        if not self.github_repo_id:
+            raise UserError("No repository selected")
+
+        temp_dir = tempfile.mkdtemp(prefix="odoo_repos_")
+        try:
+            repo_url = f"https://github.com/{self.github_repo_owner}/{self.github_repo_id}.git"
+            repo_path = os.path.join(temp_dir, self.github_repo_id)
+            
+            # Clone repository
+            git.Repo.clone_from(repo_url, repo_path)
+            
+            # Get list of files and folders
+            items = []
+            for root, dirs, files in os.walk(repo_path):
+                rel_path = os.path.relpath(root, repo_path)
+                if rel_path != '.':
+                    items.append({
+                        'path': rel_path,
+                        'type': 'directory',
+                        'name': os.path.basename(rel_path)
+                    })
+                
+                for file in files:
+                    file_path = os.path.join(rel_path, file)
+                    items.append({
+                        'path': file_path,
+                        'type': 'file',
+                        'name': file
+                    })
+            
+            return items
+
+        except Exception as e:
+            _logger.error(f"Error getting repository items: {str(e)}")
+            raise UserError(f"Failed to get repository items: {str(e)}")
+        
+        finally:
+            if os.path.exists(temp_dir):
+                os.system(f"rm -rf {temp_dir}")
+
+    def action_download_report(self):
+        """ Allows downloading the analysis report """
+        if not self.report_text:
+            raise UserError("No report available for download.")
+
+        return {
+            'type': 'ir.actions.act_url',
+            'url': f'/app_generator/download_report?generator_id={self.id}',
+            'target': 'self',
+        }
+
+    def analyze_code(self):
+        """Analyze selected code using Groq"""
+        self.ensure_one()
+        if not self.github_repo_items_selected:
+            raise UserError("No repository items selected for analysis")
+
+        try:
+            self.state = 'analyzing'
+            start_time = fields.Datetime.now()
+
+            # Get Groq configuration
+            api_key = self.env['ir.config_parameter'].sudo().get_param('email_nlp.groq_api_key')
+            if not api_key:
+                raise UserError("Groq API key not configured")
+
+            model_config = self.env['nlp.model.config'].search([('is_active', '=', True)], limit=1)
+            if not model_config:
+                raise UserError("No active Groq model configured")
+
+            # Initialize Groq client
+            client = groq.Groq(api_key=api_key)
+
+            # Prepare system prompt based on analysis type
+            system_prompt = self._get_analysis_prompt()
+
+            # Get selected code content
+            code_content = self._get_selected_code_content()
+
+            # Make API call
+            response = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": code_content}
+                ],
+                model=model_config.name,
+                temperature=0.1,
+                max_tokens=model_config.max_tokens
+            )
+
+            # Process response
+            analysis_result = response.choices[0].message.content
+
+            # Update record
+            end_time = fields.Datetime.now()
+            self.write({
+                'report_text': analysis_result,
+                'state': 'done',
+                'analysis_date': end_time,
+                'analysis_duration': (end_time - start_time).total_seconds(),
+                'error_message': False
+            })
+
+            # Post message
+            self.message_post(
+                body="Code analysis completed successfully",
+                message_type='notification'
+            )
+
+            return True
+
+        except Exception as e:
+            self.write({
+                'state': 'failed',
+                'error_message': str(e)
+            })
+            _logger.error(f"Analysis failed: {str(e)}")
+            raise UserError(f"Analysis failed: {str(e)}")
+
+    def _get_analysis_prompt(self):
+        """Get system prompt based on analysis type"""
+        base_prompt = """You are an expert Odoo developer analyzing code for quality and best practices.
+Focus on providing actionable insights and specific recommendations."""
+
+        if self.analysis_type == 'security':
+            return base_prompt + """
+Specifically analyze:
+- Security vulnerabilities
+- Access rights and record rules
+- Input validation
+- SQL injection risks
+- Authentication and authorization"""
+
+        elif self.analysis_type == 'performance':
+            return base_prompt + """
+Specifically analyze:
+- Database query optimization
+- Computed fields and search optimization
+- Caching opportunities
+- Resource intensive operations
+- Memory usage"""
+
+        else:  # full analysis
+            return base_prompt + """
+Provide a comprehensive analysis including:
+- Code structure and organization
+- Security considerations
+- Performance optimization
+- Best practices compliance
+- Documentation quality
+- Test coverage"""
+
+    def _get_selected_code_content(self):
+        """Get content of selected files"""
+        if not self.github_repo_items_selected:
+            return ""
+
+        temp_dir = tempfile.mkdtemp(prefix="odoo_analysis_")
+        try:
+            repo_path = os.path.join(temp_dir, self.github_repo_id)
+            git.Repo.clone_from(
+                f"https://github.com/{self.github_repo_owner}/{self.github_repo_id}.git",
+                repo_path
+            )
+
+            selected_paths = self.github_repo_items_selected.split(',')
+            content = []
+
+            for path in selected_paths:
+                full_path = os.path.join(repo_path, path)
+                if os.path.exists(full_path):
+                    if os.path.isfile(full_path):
+                        with open(full_path, 'r') as f:
+                            content.append(f"File: {path}\n{f.read()}\n")
+
+            return "\n".join(content)
+
+        finally:
+            if os.path.exists(temp_dir):
+                os.system(f"rm -rf {temp_dir}")
+
+# models/res_config_settings.py
+from odoo import fields, models
+
+class ResConfigSettings(models.TransientModel):
+    _inherit = 'res.config.settings'
+
+    github_token = fields.Char(
+        string='GitHub Token',
+        config_parameter='odoo_app_generator.github_token',
+        help="GitHub personal access token for API authentication"
+    )
+    
+    groq_api_key = fields.Char(
+        string='Groq API Key',
+        config_parameter='odoo_app_generator.groq_api_key',
+        help="API key for Groq integration"
+    )
+    
+    default_analysis_type = fields.Selection([
+        ('full', 'Full Analysis'),
+        ('security', 'Security Review'),
+        ('performance', 'Performance Review')
+    ], string='Default Analysis Type',
+        default='full',
+        config_parameter='odoo_app_generator.default_analysis_type'
+    )
+
+    def test_groq_connection(self):
+        """Test connection to Groq API"""
+        api_key = self.groq_api_key
+        if not api_key:
+            raise UserError("Please set your Groq API key first")
+
+        try:
+            client = groq.Groq(api_key=api_key)
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": "Test connection"}],
+                model="gemma2-9b-it",
+                max_tokens=10
+            )
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Success',
+                    'message': 'Successfully connected to Groq API',
+                    'type': 'success',
+                }
+            }
+        except Exception as e:
+            raise UserError(f"Failed to connect to Groq API: {str(e)}")
+EOF
+
+        res_config_settings.py
+from odoo import fields, models
+
+class ResConfigSettings(models.TransientModel):
+    _inherit = 'res.config.settings'
+
+    github_token = fields.Char(
+        string='GitHub Token',
+        config_parameter='odoo_app_generator.github_token',
+        help="GitHub personal access token for API authentication"
+    )
+    
+    groq_api_key = fields.Char(
+        string='Groq API Key',
+        config_parameter='odoo_app_generator.groq_api_key',
+        help="API key for Groq integration"
+    )
+    
+    default_analysis_type = fields.Selection(
+        selection=[
+            ('full', 'Full Analysis'),
+            ('security', 'Security Review'),
+            ('performance', 'Performance Review')
+        ],
+        string='Default Analysis Type',
+        default='full',
+        config_parameter='odoo_app_generator.default_analysis_type',
+        default_model='odoo.app.generator'
+    )
+
+    advanced_settings = fields.Boolean(
+        string='Advanced Settings',
+        config_parameter='odoo_app_generator.advanced_settings',
+        default_model='odoo.app.generator'
+    )
+
+    max_file_size = fields.Integer(
+        string='Maximum File Size',
+        config_parameter='odoo_app_generator.max_file_size',
+        default=10,
+        default_model='odoo.app.generator'
+    )
+
+    analysis_timeout = fields.Integer(
+        string='Analysis Timeout',
+        config_parameter='odoo_app_generator.analysis_timeout',
+        default=300,
+        default_model='odoo.app.generator'
+    )
+
+    def test_groq_connection(self):
+        """Test connection to Groq API"""
+        api_key = self.groq_api_key
+        if not api_key:
+            raise UserError("Please set your Groq API key first")
+
+        try:
+            client = groq.Groq(api_key=api_key)
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": "Test connection"}],
+                model="gemma2-9b-it",
+                max_tokens=10
+            )
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': 'Success',
+                    'message': 'Successfully connected to Groq API',
+                    'type': 'success',
+                }
+            }
+        except Exception as e:
+            raise UserError(f"Failed to connect to Groq API: {str(e)}")
+EOF
+
+    static/
+        description/
+        src/
+            css/
+                app_generator.css
+/* CSS styles */
+/* static/src/css/app_generator.css */
+
+.o_file_selector_dialog {
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: 1rem;
+}
+
+.o_file_list {
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 0.5rem;
+}
+
+.o_file_item {
+    display: flex;
+    align-items: center;
+    padding: 0.25rem 0.5rem;
+    transition: background-color 0.2s;
+}
+
+.o_file_item:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+.o_file_item .form-check {
+    margin-bottom: 0;
+}
+
+.o_file_item i {
+    width: 1.25rem;
+    text-align: center;
+}
+
+.o_analysis_statistics {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #f8f9fa;
+    border-radius: 0.25rem;
+}
+
+.o_analysis_error {
+    color: #dc3545;
+    padding: 1rem;
+    background-color: #f8d7da;
+    border: 1px solid #f5c6cb;
+    border-radius: 0.25rem;
+    margin-bottom: 1rem;
+}
+EOF
+
+            js/
+                repo_selector.js
+/** @odoo-module **/
+
+import { registry } from "@web/core/registry";
+import { useService } from "@web/core/utils/hooks";
+import { FileSelector } from "./file_selector";
+import { FormController } from "@web/views/form/form_controller";
+import { formView } from "@web/views/form/form_view";
+
+/**
+ * Custom Form Controller for App Generator
+ * Extends standard form controller to add repository selection and analysis functionality
+ */
+class AppGeneratorFormController extends FormController {
+    setup() {
+        super.setup();
+        this.orm = useService("orm");
+        this.dialog = useService("dialog");
+        this.notification = useService("notification");
+        this.action = useService("action");
+        this.rpc = useService("rpc");
+    }
+
+    /**
+     * @override
+     * Handles field changes and triggers repository selection when appropriate
+     */
+    async onFieldChanged(record, fieldName) {
+        await super.onFieldChanged(...arguments);
+        if (fieldName === 'github_repo_id') {
+            await this._onRepoSelect(record);
+        }
+    }
+
+    /**
+     * Handles repository selection and opens file selector dialog
+     * @private
+     */
+    async _onRepoSelect(record) {
+        if (!record.data.github_repo_id) {
+            return;
+        }
+
+        try {
+            const items = await this.orm.call(
+                'odoo.app.generator',
+                'get_repository_items',
+                [record.resId]
+            );
+
+            if (!items || !items.length) {
+                this.notification.add(
+                    "No items found in repository",
+                    { type: "warning" }
+                );
+                return;
+            }
+
+            this.dialog.add(FileSelector, {
+                title: "Select Files to Analyze",
+                items: items,
+                confirm: async (selectedItems) => {
+                    await this._updateSelectedItems(record, selectedItems);
+                }
+            });
+        } catch (error) {
+            this.notification.add(
+                error.message || "Failed to load repository items",
+                { type: "danger" }
+            );
+        }
+    }
+
+    /**
+     * Updates the record with selected repository items
+     * @private
+     */
+    async _updateSelectedItems(record, selectedItems) {
+        try {
+            await this.orm.write('odoo.app.generator', [record.resId], {
+                github_repo_items_selected: selectedItems.join(',')
+            });
+            await record.load();
+            this.notification.add(
+                "Repository items updated successfully",
+                { type: "success" }
+            );
+        } catch (error) {
+            this.notification.add(
+                "Failed to update selected items",
+                { type: "danger" }
+            );
+        }
+    }
+
+    /**
+     * Handles report download action
+     * @private
+     */
+    async _downloadReport(record) {
+        if (record.data.state !== 'done') {
+            this.notification.add(
+                "Analysis must be completed before downloading the report",
+                { type: "warning" }
+            );
+            return;
+        }
+
+        const generator_id = record.resId;
+        window.location.href = `/app_generator/download_report?generator_id=${generator_id}`;
+    }
+
+    /**
+     * @override
+     * Custom button handling for app generator actions
+     */
+    async onClickViewButton(params) {
+        const { clickParams, record } = params;
+        if (clickParams.name === 'action_download_report') {
+            await this._downloadReport(record);
+            return;
+        }
+        return super.onClickViewButton(params);
+    }
+}
+
+// Register the custom form view
+registry.category("views").add("app_generator_form", {
+    ...formView,
+    Controller: AppGeneratorFormController,
+    buttonTemplate: "app_generator.FormViewButtons",
+});
+
+export default AppGeneratorFormController;
+EOF
+
+                file_selector.js
+/** @odoo-module **/
+
+import { registry } from "@web/core/registry";
+import { useService } from "@web/core/utils/hooks";
+import { Dialog } from "@web/core/dialog/dialog";
+
+class FileSelector extends Dialog {
+    setup() {
+        super.setup();
+        this.items = this.props.items || [];
+        this.selectedItems = new Set();
+        this.orm = useService("orm");
+        this.notification = useService("notification");
+    }
+
+    toggleItem(event, item) {
+        const checkbox = event.target;
+        if (checkbox.checked) {
+            this.selectedItems.add(item.path);
+            // Automatically select parent directories
+            let pathParts = item.path.split('/');
+            while (pathParts.length > 1) {
+                pathParts.pop();
+                this.selectedItems.add(pathParts.join('/'));
+            }
+        } else {
+            this.selectedItems.delete(item.path);
+            // Automatically deselect child items
+            if (item.type === 'directory') {
+                this.items.forEach(i => {
+                    if (i.path.startsWith(item.path + '/')) {
+                        this.selectedItems.delete(i.path);
+                    }
+                });
+            }
+        }
+    }
+
+    isSelected(item) {
+        return this.selectedItems.has(item.path);
+    }
+
+    isParentSelected(item) {
+        const pathParts = item.path.split('/');
+        while (pathParts.length > 1) {
+            pathParts.pop();
+            if (this.selectedItems.has(pathParts.join('/'))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    async onConfirm() {
+        try {
+            await this.props.confirm([...this.selectedItems]);
+            this.notification.add(
+                "Items selected successfully",
+                { type: "success" }
+            );
+        } catch (error) {
+            this.notification.add(
+                error.message || "Failed to save selected items",
+                { type: "danger" }
+            );
+        }
+        this.close();
+    }
+
+    getItemIndentation(path) {
+        return (path.split('/').length - 1) * 20;
+    }
+}
+
+FileSelector.template = 'odoo_app_generator.FileSelector';
+FileSelector.components = { Dialog };
+
+export { FileSelector };
+EOF
+
+            xml/
+                file_selector.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+    <t t-name="odoo_app_generator.FileSelector">
+        <Dialog size="'xl'" title="title">
+            <div class="o_file_selector_dialog">
+                <div class="mb-3">
+                    <div class="form-text">
+                        Select files and folders to include in the analysis.
+                        Selecting a folder automatically includes all its contents.
+                    </div>
+                </div>
+                <div class="o_file_list">
+                    <t t-foreach="items" t-as="item" t-key="item.path">
+                        <div class="o_file_item" 
+                             t-att-style="'padding-left: ' + getItemIndentation(item.path) + 'px'">
+                            <div class="form-check">
+                                <input type="checkbox" 
+                                       class="form-check-input"
+                                       t-att-checked="isSelected(item) || isParentSelected(item)"
+                                       t-att-disabled="isParentSelected(item)"
+                                       t-on-change="(ev) => this.toggleItem(ev, item)"/>
+                                <label class="form-check-label">
+                                    <i t-if="item.type === 'directory'" 
+                                       class="fa fa-folder text-warning me-2"/>
+                                    <i t-else="" 
+                                       class="fa fa-file-text-o text-info me-2"/>
+                                    <span t-esc="item.name"/>
+                                </label>
+                            </div>
+                        </div>
+                    </t>
+                </div>
+            </div>
+            <t t-set-slot="footer">
+                <button class="btn btn-primary" t-on-click="onConfirm">
+                    Confirm Selection
+                </button>
+                <button class="btn btn-secondary" t-on-click="close">
+                    Cancel
+                </button>
+            </t>
+        </Dialog>
+    </t>
+</templates>
+EOF
+
+    wizards/
+        app_analyzer_wizard.py
+from odoo import models, fields, api
+from odoo.exceptions import UserError
+
+class AppAnalyzerWizard(models.TransientModel):
+    _name = 'app.analyzer.wizard'
+    _description = 'App Analysis Wizard'
+
+    generator_id = fields.Many2one('odoo.app.generator', string='Generator', required=True)
+    include_dependencies = fields.Boolean('Include Dependencies', default=True)
+    analyze_tests = fields.Boolean('Analyze Tests', default=True)
+    custom_prompt = fields.Text('Custom Analysis Prompt')
+
+    @api.model
+    def default_get(self, fields_list):
+        res = super().default_get(fields_list)
+        if self._context.get('active_id'):
+            res['generator_id'] = self._context['active_id']
+        return res
+
+    def action_analyze(self):
+        self.ensure_one()
+        if not self.generator_id.github_repo_items_selected:
+            raise UserError("No items selected for analysis")
+            
+        return self.generator_id.analyze_code()
+EOF
+
+        __init__.py
+from . import app_analyzer_wizard
+
+EOF
+
+    controllers/
+        __init__.py
+from . import main
+
+EOF
+
+        main.py
+from odoo import http
+from odoo.http import request
+import json
+
+class AppGeneratorController(http.Controller):
+    @http.route('/app_generator/get_repo_items', type='json', auth='user')
+    def get_repo_items(self, generator_id):
+        """Get repository items for file selection"""
+        try:
+            generator = request.env['odoo.app.generator'].browse(int(generator_id))
+            return generator.get_repository_items()
+        except Exception as e:
+            return {'error': str(e)}
+
+    @http.route('/app_generator/analyze', type='json', auth='user')
+    def analyze_repository(self, generator_id, selected_items):
+        """Trigger repository analysis"""
+        try:
+            generator = request.env['odoo.app.generator'].browse(int(generator_id))
+            generator.write({'github_repo_items_selected': json.dumps(selected_items)})
+            return generator.analyze_code()
+        except Exception as e:
+            return {'error': str(e)}
+
+    @http.route('/app_generator/download_report', type='http', auth='user')
+    def download_report(self, generator_id):
+        """Download analysis report"""
+        generator = request.env['odoo.app.generator'].browse(int(generator_id))
+        if not generator.exists() or not generator.report_text:
+            return request.not_found()
+            
+        return request.make_response(
+            generator.report_text,
+            headers=[
+                ('Content-Type', 'text/html'),
+                ('Content-Disposition', f'attachment; filename="{generator.output_file_name}"')
+            ]
+        )
+EOF
+
+    data/
+        app_generator_data.xml
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data noupdate="1">
+        <!-- Default Settings -->
+        <record id="default_analysis_type" model="ir.config_parameter">
+            <field name="key">odoo_app_generator.default_analysis_type</field>
+            <field name="value">full</field>
+        </record>
+    </data>
+</odoo>
+EOF
+
+    views/
+        menu_views.xml
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Root Menu -->
+    <menuitem id="menu_app_generator_root"
+              name="App Generator"
+              web_icon="odoo_app_generator,static/description/icon.png"
+              sequence="50"/>
+
+    <!-- Analyzers Menu -->
+    <menuitem id="menu_app_generator"
+              name="Analyzers"
+              parent="menu_app_generator_root"
+              action="action_app_generator"
+              sequence="10"
+              groups="odoo_app_generator.group_app_generator_manager"/>
+
+    <!-- Configuration Menu -->
+    <menuitem id="menu_app_generator_config"
+              name="Configuration"
+              parent="menu_app_generator_root"
+              sequence="100"
+              groups="odoo_app_generator.group_app_generator_manager"/>
+
+    <!-- Settings Menu -->
+    <menuitem id="menu_app_generator_settings"
+              name="Settings"
+              parent="menu_app_generator_config"
+              action="action_app_generator_configuration"
+              sequence="10"
+              groups="odoo_app_generator.group_app_generator_manager"/>
+</odoo>
+EOF
+
+        res_config_settings_views.xml
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="res_config_settings_view_form_generator" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.inherit.generator</field>
+        <field name="model">res.config.settings</field>
+        <field name="priority">90</field>
+        <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//form/app[last()]" position="after">
+                <app name="odoo_app_generator" string="App Generator" id="app_generator">
+                    <block title="Generator Configuration">
+                        <setting string="GitHub Configuration" help="Configure GitHub API access for repository analysis">
+                            <div class="content-group">
+                                <div class="row mt16">
+                                    <label for="github_token" class="col-lg-3 o_light_label"/>
+                                    <field name="github_token" password="True"/>
+                                </div>
+                                <div class="text-muted mt8">
+                                    Personal access token with repository access permissions
+                                </div>
+                            </div>
+                        </setting>
+
+                        <setting string="Groq Configuration" help="Configure Groq API for code analysis">
+                            <div class="content-group">
+                                <div class="row mt16">
+                                    <label for="groq_api_key" class="col-lg-3 o_light_label"/>
+                                    <field name="groq_api_key" password="True"/>
+                                </div>
+                                <div class="row mt16">
+                                    <button name="test_groq_connection" 
+                                            type="object" 
+                                            string="Test Connection" 
+                                            class="btn-primary"/>
+                                </div>
+                            </div>
+                        </setting>
+
+                        <setting string="Analysis Settings" help="Configure default analysis parameters">
+                            <div class="row mt16">
+                                <label for="default_analysis_type" class="col-lg-3 o_light_label"/>
+                                <field name="default_analysis_type"/>
+                            </div>
+                            <div class="row mt16">
+                                <field name="advanced_settings"/>
+                                <label for="advanced_settings" class="o_light_label"/>
+                            </div>
+                            <div class="row mt16" invisible="not advanced_settings">
+                                <label for="max_file_size" class="col-lg-3 o_light_label"/>
+                                <field name="max_file_size"/>
+                                <span class="ml-2">MB</span>
+                            </div>
+                            <div class="row mt16" invisible="not advanced_settings">
+                                <label for="analysis_timeout" class="col-lg-3 o_light_label"/>
+                                <field name="analysis_timeout"/>
+                                <span class="ml-2">seconds</span>
+                            </div>
+                        </setting>
+                    </block>
+                </app>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Action definition needs to be loaded before the menu -->
+    <record id="action_app_generator_configuration" model="ir.actions.act_window">
+        <field name="name">Settings</field>
+        <field name="type">ir.actions.act_window</field>
+        <field name="res_model">res.config.settings</field>
+        <field name="view_mode">form</field>
+        <field name="target">inline</field>
+        <field name="context">{'module': 'odoo_app_generator'}</field>
+    </record>
+</odoo>
+EOF
+
+        app_generator_views.xml
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Tree View -->
+    <record id="view_app_generator_tree" model="ir.ui.view">
+        <field name="name">odoo.app.generator.tree</field>
+        <field name="model">odoo.app.generator</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="name"/>
+                <field name="github_repo_owner"/>
+                <field name="github_repo_id"/>
+                <field name="analysis_type"/>
+                <field name="analysis_date"/>
+                <field name="analysis_duration" widget="float_time"/>
+                <field name="state" decoration-info="state == 'draft'"
+                       decoration-warning="state == 'analyzing'"
+                       decoration-success="state == 'done'"
+                       decoration-danger="state == 'failed'"/>
+                <field name="create_date"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Form View -->
+    <record id="view_app_generator_form" model="ir.ui.view">
+        <field name="name">odoo.app.generator.form</field>
+        <field name="model">odoo.app.generator</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="fetch_repositories" 
+                            string="Fetch Repositories" 
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'draft'"/>
+                    <button name="analyze_code" 
+                            string="Analyze Code" 
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'fetched'"/>
+                    <button name="action_reset_to_draft"
+                            string="Reset to Draft"
+                            type="object"
+                            invisible="state == 'draft'"/>
+                    <button name="action_download_report"
+                            string="Download Report"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state != 'done'"/>
+                    <field name="state" widget="statusbar" 
+                           statusbar_visible="draft,fetched,analyzing,done"/>
+                </header>
+                
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="toggle_active" type="object" 
+                                class="oe_stat_button" icon="fa-archive">
+                            <field name="active" widget="boolean_button" 
+                                   options="{'terminology': 'archive'}"/>
+                        </button>
+                    </div>
+
+                    <div class="oe_title">
+                        <label for="name" class="oe_edit_only"/>
+                        <h1><field name="name" placeholder="e.g., Sales Module Analysis"/></h1>
+                    </div>
+                    
+                    <!-- Repository Information -->
+                    <group>
+                        <group string="GitHub Repository">
+                            <field name="github_repo_owner" 
+                                   placeholder="e.g., odoo"
+                                   readonly="state != 'draft'"/>
+                            <field name="github_repo_names" 
+                                   readonly="state != 'draft'"
+                                   widget="char"/>
+                            <field name="github_token" 
+                                   password="True"
+                                   readonly="state != 'draft'"/>
+                            <field name="github_repo_id" 
+                                   widget="selection"
+                                   options="{'no_create': True}"
+                                   invisible="state == 'draft'"
+                                   readonly="state not in ['fetched']"/>
+                        </group>
+                        <group string="Analysis Configuration">
+                            <field name="analysis_type" 
+                                   readonly="state not in ['draft', 'fetched']"/>
+                            <field name="analysis_date" readonly="1"/>
+                            <field name="analysis_duration" 
+                                   widget="float_time" 
+                                   readonly="1"/>
+                        </group>
+                    </group>
+
+                    <!-- Selected Items -->
+                    <group string="Selected Repository Items" 
+                           invisible="not github_repo_items_selected">
+                        <field name="github_repo_items_selected" 
+                               readonly="1" 
+                               widget="text"/>
+                    </group>
+
+                    <!-- Statistics -->
+                    <group string="Analysis Statistics" 
+                           invisible="state != 'done'">
+                        <group>
+                            <field name="line_count"/>
+                            <field name="token_count"/>
+                            <field name="output_file_name"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <!-- Analysis Results -->
+                        <page string="Analysis Results" name="analysis">
+                            <div invisible="state != 'failed'">
+                                <div class="alert alert-danger" role="alert">
+                                    <field name="error_message" readonly="1"/>
+                                </div>
+                            </div>
+                            <field name="report_text" 
+                                   widget="html" 
+                                   invisible="state != 'done'"
+                                   options="{'collaborative': true, 'resizable': true}"/>
+                        </page>
+
+                        <!-- Top Files -->
+                        <page string="Top Files" name="top_files"
+                              invisible="state != 'done'">
+                            <field name="top_5_files"/>
+                        </page>
+
+                        <!-- Technical Info -->
+                        <page string="Technical Information" 
+                              name="technical" 
+                              groups="base.group_system">
+                            <group>
+                                <field name="create_date"/>
+                                <field name="create_uid"/>
+                                <field name="write_date"/>
+                                <field name="write_uid"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+                
+                <!-- Chatter -->
+                <div class="oe_chatter">
+                    <field name="message_follower_ids" groups="base.group_user"/>
+                    <field name="activity_ids"/>
+                    <field name="message_ids"/>
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <!-- Search View -->
+    <record id="view_app_generator_search" model="ir.ui.view">
+        <field name="name">odoo.app.generator.search</field>
+        <field name="model">odoo.app.generator</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name"/>
+                <field name="github_repo_owner"/>
+                <field name="github_repo_id"/>
+                
+                <filter string="Draft" name="state_draft" 
+                        domain="[('state', '=', 'draft')]"/>
+                <filter string="In Progress" name="state_analyzing" 
+                        domain="[('state', '=', 'analyzing')]"/>
+                <filter string="Done" name="state_done" 
+                        domain="[('state', '=', 'done')]"/>
+                <filter string="Failed" name="state_failed" 
+                        domain="[('state', '=', 'failed')]"/>
+                
+                <separator/>
+                <filter string="My Analyses" name="my_analyses"
+                        domain="[('create_uid', '=', uid)]"/>
+                <filter string="This Month" name="this_month"
+                        domain="[('create_date', '>=', (context_today() + relativedelta(day=1)).strftime('%Y-%m-%d'))]"/>
+                <filter string="Archived" name="inactive" 
+                        domain="[('active', '=', False)]"/>
+
+                <group expand="0" string="Group By">
+                    <filter string="State" name="group_by_state" 
+                            context="{'group_by': 'state'}"/>
+                    <filter string="Analysis Type" name="group_by_type"
+                            context="{'group_by': 'analysis_type'}"/>
+                    <filter string="Repository Owner" name="group_by_owner"
+                            context="{'group_by': 'github_repo_owner'}"/>
+                    <filter string="Month" name="group_by_month"
+                            context="{'group_by': 'create_date:month'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Main Action -->
+    <record id="action_app_generator" model="ir.actions.act_window">
+        <field name="name">App Generator</field>
+        <field name="res_model">odoo.app.generator</field>
+        <field name="view_mode">tree,form</field>
+        <field name="context">{
+            'search_default_state_draft': 1,
+            'search_default_my_analyses': 1
+        }</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                Create your first code analysis
+            </p>
+            <p>
+                Generate comprehensive analysis of Odoo modules from GitHub repositories.
+                The analysis includes security review, performance optimization suggestions,
+                and best practices recommendations.
+            </p>
+        </field>
+    </record>
+</odoo>
+EOF
+
